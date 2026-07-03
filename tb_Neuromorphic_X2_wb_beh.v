@@ -28,6 +28,7 @@ module tb_Neuromorphic_X2_wb_beh;
 
   integer pass_count;
   integer col_loop;
+  integer i;
   reg ack_prev;
 	
 	reg [31:0] rdata;
@@ -273,6 +274,28 @@ module tb_Neuromorphic_X2_wb_beh;
     wb_write(make_packet(2'b01, 5'd2, 5'd3, 1'b0, 1'b0, 8'h12));
 		repeat (400) @(posedge wb_clk_i);
     wb_read32(ADDR_MATCH, rdata);
+
+    // -----------------------------------------------------------------------
+    // COMPUTE TEST 1: before runtime reconfiguration.
+    //
+    // Rows 10 and 11 are SET at column 7, row 12 is RESET at column 7.
+    // Compute should include only SET rows:
+    //   expected_tdc = 8'h03 + 8'h04 = 14'h0007
+    //   expected_word = {13'd0, 5'd7, 14'h0007} = 32'h0001_C007
+    // -----------------------------------------------------------------------
+    wb_write(make_packet(2'b11, 5'd10, 5'd7, 1'b0, 1'b0, 8'h55));
+    wb_write(make_packet(2'b11, 5'd11, 5'd7, 1'b0, 1'b0, 8'h66));
+    wb_write(make_packet(2'b00, 5'd12, 5'd7, 1'b0, 1'b0, 8'h77));
+
+    wb_write(make_packet(2'b10, 5'd10, 5'd7, 1'b0, 1'b0, 8'h08));
+    wb_write(make_packet(2'b10, 5'd11, 5'd7, 1'b0, 1'b0, 8'h07));
+    wb_write(make_packet(2'b10, 5'd12, 5'd7, 1'b0, 1'b0, 8'h08));
+    repeat (500) @(posedge wb_clk_i);
+		for(i=0;i<32;i=i+1) begin
+      wb_read32(ADDR_MATCH, rdata);
+		end
+		
+		
 		
 		wb_write(RECONFIG_PACKET);
     write_configuration_2();
@@ -295,7 +318,26 @@ module tb_Neuromorphic_X2_wb_beh;
     wb_write(make_packet(2'b01, 5'd2, 5'd3, 1'b0, 1'b0, 8'h12));
 		repeat (400) @(posedge wb_clk_i);
     wb_read32(ADDR_MATCH, rdata);
-		
+
+    // -----------------------------------------------------------------------
+    // COMPUTE TEST 2: after runtime reconfiguration.
+    //
+    // Rows 13, 14, and 15 are SET at column 8.
+    // Compute should include all three rows:
+    //   expected_tdc = 8'h02 + 8'h03 + 8'h04 = 14'h0009
+    //   expected_word = {13'd0, 5'd8, 14'h0009} = 32'h0002_0009
+    // -----------------------------------------------------------------------
+    wb_write(make_packet(2'b11, 5'd13, 5'd8, 1'b0, 1'b0, 8'h21));
+    wb_write(make_packet(2'b11, 5'd14, 5'd8, 1'b0, 1'b0, 8'h22));
+    wb_write(make_packet(2'b11, 5'd15, 5'd8, 1'b0, 1'b0, 8'h23));
+
+    wb_write(make_packet(2'b10, 5'd13, 5'd8, 1'b0, 1'b0, 8'hFF));
+    wb_write(make_packet(2'b10, 5'd14, 5'd8, 1'b0, 1'b0, 8'h12));
+    wb_write(make_packet(2'b10, 5'd15, 5'd8, 1'b0, 1'b0, 8'h04));
+    repeat (500) @(posedge wb_clk_i);
+    for(i=0;i<32;i=i+1) begin
+      wb_read32(ADDR_MATCH, rdata);
+		end
 		
 		
 		/*

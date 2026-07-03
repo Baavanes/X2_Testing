@@ -13,6 +13,10 @@
 //
 // Result format:
 //   wbs_dat_o = {13'd0, column[4:0], tdc_value[13:0]}
+//
+// Compute-mode result order:
+//   selected compute column first, then all remaining columns from 0 to 31,
+//   skipping the selected column because it was already returned first.
 // -----------------------------------------------------------------------------
 
 module Neuromorphic_X2_wb_beh #(
@@ -157,6 +161,13 @@ module Neuromorphic_X2_wb_beh #(
     end
   endfunction
 
+  function [13:0] timeout_tdc_value;
+    input [6:0] timeout_config;
+    begin
+      timeout_tdc_value = {7'd0, timeout_config};
+    end
+  endfunction
+
   function [13:0] cell_value;
     input [4:0] row_index;
     input [4:0] col_index;
@@ -270,42 +281,49 @@ module Neuromorphic_X2_wb_beh #(
     end
   endtask
 
+  task push_compute_column;
+    input [31:0] packet0;
+    input [31:0] packet1;
+    input [31:0] packet2;
+    input [4:0]  col_index;
+    reg [13:0] acc;
+    begin
+      acc = 14'd0;
+
+      if (array_state[packet0[29:25]][col_index])
+        acc = acc + {6'd0, packet0[7:0]};
+      if (array_state[packet1[29:25]][col_index])
+        acc = acc + {6'd0, packet1[7:0]};
+      if (array_state[packet2[29:25]][col_index])
+        acc = acc + {6'd0, packet2[7:0]};
+
+      push_response(result_word(col_index, acc));
+    end
+  endtask
+
   task emit_compute_results;
     input [31:0] packet0;
     input [31:0] packet1;
     input [31:0] packet2;
     integer col;
     reg [31:0] rows;
-    reg [31:0] cols;
-    reg [13:0] acc;
+    reg [4:0] selected_col;
     begin
       rows = onehot5(packet0[29:25]) |
              onehot5(packet1[29:25]) |
              onehot5(packet2[29:25]);
 
-      if (packet0[18] || packet1[18] || packet2[18])
-        cols = 32'hFFFF_FFFF;
-      else
-        cols = onehot5(packet0[24:20]) |
-               onehot5(packet1[24:20]) |
-               onehot5(packet2[24:20]);
+      selected_col = packet2[24:20];
 
       wait_cycles(COMPUTE_DELAY);
 
       if (!wb_rst_i) begin
+        push_compute_column(packet0, packet1, packet2, selected_col);
+
         for (col = 0; col < 32; col = col + 1) begin
-          if (cols[col]) begin
-            acc = 14'd0;
-
-            if (array_state[packet0[29:25]][col])
-              acc = acc + {6'd0, packet0[7:0]};
-            if (array_state[packet1[29:25]][col])
-              acc = acc + {6'd0, packet1[7:0]};
-            if (array_state[packet2[29:25]][col])
-              acc = acc + {6'd0, packet2[7:0]};
-
-            push_response(result_word(col[4:0], acc));
-          end
+          if (col[4:0] != selected_col)
+            push_response(result_word(col[4:0],
+                                      timeout_tdc_value(tdc_time_out)));
         end
 
         status_code = (rows == 32'h0000_0000) ? STATUS_BAD_COMMAND : STATUS_OK;

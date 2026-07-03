@@ -261,10 +261,71 @@ mode = 2'b10
 
 Compute mode waits for three compute packets. The first two packets are stored.
 When the third compute packet arrives, the model waits `COMPUTE_DELAY` and
-generates result words.
+generates 32 result words.
 
-For each selected column, the model adds the packet data bytes for rows whose
-stored `array_state` bit is SET.
+The selected compute column is taken from the third compute packet:
+
+```verilog
+selected_col = packet2[24:20];
+```
+
+The result order is:
+
+```text
+selected column first,
+then columns 0 to 31 in order,
+skipping the selected column because it was already returned first
+```
+
+For example, if the third compute packet uses column `7`, the returned column
+order is:
+
+```text
+7, 0, 1, 2, 3, 4, 5, 6, 8, 9, ..., 31
+```
+
+The first result word is the computed result for the selected column. For that
+selected column, the model checks the three compute rows. If the corresponding
+cell is SET, that packet's `data_byte` is added to the compute TDC value:
+
+```verilog
+acc = 14'd0;
+
+if (array_state[packet0_row][selected_col])
+  acc = acc + packet0_data_byte;
+
+if (array_state[packet1_row][selected_col])
+  acc = acc + packet1_data_byte;
+
+if (array_state[packet2_row][selected_col])
+  acc = acc + packet2_data_byte;
+
+first_compute_word = {13'd0, selected_col, acc};
+```
+
+The remaining 31 result words use the column address of each remaining column
+and a timeout TDC value. The timeout TDC keeps `tdc_time_out` in the LSB side
+and pads the upper bits with zero:
+
+```verilog
+timeout_tdc_value = {7'd0, tdc_time_out[6:0]};
+remaining_word    = {13'd0, column[4:0], timeout_tdc_value[13:0]};
+```
+
+So if `tdc_time_out = 7'd32`, the remaining columns return:
+
+```verilog
+timeout_tdc_value = 14'h0020;
+```
+
+If `tdc_time_out = 7'd40`, the remaining columns return:
+
+```verilog
+timeout_tdc_value = 14'h0028;
+```
+
+Because each Wishbone read returns only one 32-bit word, software or the
+testbench must perform 32 Wishbone reads after one compute operation.
 
 ### SET Mode
 
@@ -304,6 +365,17 @@ tdc_value   = rdata[13:0];
 ```
 
 Bits `[31:19]` are zero for normal TDC result words.
+
+The same output packing is used for compute results:
+
+```verilog
+compute_column = rdata[18:14];
+compute_tdc    = rdata[13:0];
+```
+
+For compute, the first returned word contains the selected-column computation.
+The following 31 returned words contain the timeout TDC value and each remaining
+column address.
 
 ## TDC Value Calculation
 
@@ -403,8 +475,14 @@ Normal TDC reads should keep bit `[19]` low.
 - Always send the three config writes after reset before normal commands.
 - SET and RESET only update the modeled cell state and TDC level.
 - READ commands generate output data.
+- COMPUTE commands are accepted as a group of three packets.
+- One COMPUTE operation generates 32 response words.
+- After COMPUTE, perform 32 Wishbone reads to drain the full result set.
+- The first COMPUTE read is the selected column output.
+- The remaining COMPUTE reads return timeout TDC values with the remaining
+  column addresses.
+- Compute timeout TDC packing is `{7'd0, tdc_time_out[6:0]}`.
 - Wishbone bus reads only complete when response data is ready.
 - Decode `rdata[18:14]` as column and `rdata[13:0]` as TDC value.
 - Do not expect a response word immediately from SET or RESET unless a READ
   command has been sent.
-

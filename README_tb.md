@@ -314,9 +314,11 @@ The active sequence is:
 6. Perform `wb_read32` transactions to capture TDC result words.
 7. Program one cell with RESET.
 8. Read that RESET-programmed cell.
-9. Trigger runtime reconfiguration.
-10. Send the second three configuration writes.
-11. Repeat a similar SET/READ/RESET flow after reconfiguration.
+9. Run Compute Test 1 before runtime reconfiguration.
+10. Trigger runtime reconfiguration.
+11. Send the second three configuration writes.
+12. Repeat a similar SET/READ/RESET flow after reconfiguration.
+13. Run Compute Test 2 after runtime reconfiguration.
 
 Example from the active flow:
 
@@ -332,6 +334,158 @@ Meaning:
 1. SET row `1`, column `3` with program byte `8'hA5`.
 2. Send a READ command for row `1`, column `3` with read byte `8'h12`.
 3. Later perform a Wishbone read to capture the generated response.
+
+## Active Compute Functionality
+
+The updated behavioral model returns 32 Wishbone read words after one compute
+operation.
+
+The compute command is sent as three packets. The selected compute column is
+taken from the third compute packet:
+
+```verilog
+selected_col = third_compute_packet[24:20];
+```
+
+The output order is:
+
+```text
+selected column first,
+then columns 0 to 31 in order,
+skipping the selected column
+```
+
+The first output word contains the computed result for the selected column:
+
+```verilog
+rdata = {13'd0, selected_col[4:0], compute_tdc[13:0]};
+```
+
+The remaining 31 output words contain each remaining column address and the
+timeout TDC value:
+
+```verilog
+timeout_tdc = {7'd0, tdc_time_out[6:0]};
+rdata       = {13'd0, column[4:0], timeout_tdc[13:0]};
+```
+
+The active testbench drains those 32 words using:
+
+```verilog
+for (i = 0; i < 32; i = i + 1) begin
+  wb_read32(ADDR_MATCH, rdata);
+end
+```
+
+### Compute Test 1 Before Reconfiguration
+
+Before runtime reconfiguration, `tdc_time_out` is `7'd32`, so timeout columns
+return:
+
+```verilog
+timeout_tdc = {7'd0, 7'd32} = 14'h0020;
+```
+
+The testbench programs column `7`:
+
+```verilog
+wb_write(make_packet(2'b11, 5'd10, 5'd7, 1'b0, 1'b0, 8'h55));
+wb_write(make_packet(2'b11, 5'd11, 5'd7, 1'b0, 1'b0, 8'h66));
+wb_write(make_packet(2'b00, 5'd12, 5'd7, 1'b0, 1'b0, 8'h77));
+```
+
+That means:
+
+```text
+row 10, column 7 is SET
+row 11, column 7 is SET
+row 12, column 7 is RESET
+```
+
+Then it sends three compute packets:
+
+```verilog
+wb_write(make_packet(2'b10, 5'd10, 5'd7, 1'b0, 1'b0, 8'h08));
+wb_write(make_packet(2'b10, 5'd11, 5'd7, 1'b0, 1'b0, 8'h07));
+wb_write(make_packet(2'b10, 5'd12, 5'd7, 1'b0, 1'b0, 8'h08));
+```
+
+The selected column is `7`. Since rows 10 and 11 are SET, and row 12 is RESET,
+only the first two compute data bytes contribute:
+
+```verilog
+compute_tdc = 8'h08 + 8'h07 = 14'h000F;
+```
+
+The first compute read should therefore contain:
+
+```verilog
+{13'd0, 5'd7, 14'h000F}
+```
+
+The remaining 31 reads should return columns:
+
+```text
+0, 1, 2, 3, 4, 5, 6, 8, 9, ..., 31
+```
+
+with:
+
+```verilog
+tdc_value = 14'h0020;
+```
+
+### Compute Test 2 After Reconfiguration
+
+After runtime reconfiguration, `tdc_time_out` is `7'd40`, so timeout columns
+return:
+
+```verilog
+timeout_tdc = {7'd0, 7'd40} = 14'h0028;
+```
+
+The testbench programs column `8`:
+
+```verilog
+wb_write(make_packet(2'b11, 5'd13, 5'd8, 1'b0, 1'b0, 8'h21));
+wb_write(make_packet(2'b11, 5'd14, 5'd8, 1'b0, 1'b0, 8'h22));
+wb_write(make_packet(2'b11, 5'd15, 5'd8, 1'b0, 1'b0, 8'h23));
+```
+
+That means rows 13, 14, and 15 are all SET at column `8`.
+
+Then it sends three compute packets:
+
+```verilog
+wb_write(make_packet(2'b10, 5'd13, 5'd8, 1'b0, 1'b0, 8'hFF));
+wb_write(make_packet(2'b10, 5'd14, 5'd8, 1'b0, 1'b0, 8'h12));
+wb_write(make_packet(2'b10, 5'd15, 5'd8, 1'b0, 1'b0, 8'h04));
+```
+
+The selected column is `8`. Since all three selected cells are SET, all three
+compute data bytes contribute:
+
+```verilog
+compute_tdc = 8'hFF + 8'h12 + 8'h04 = 14'h0115;
+```
+
+The first compute read should therefore contain:
+
+```verilog
+{13'd0, 5'd8, 14'h0115}
+```
+
+The remaining 31 reads should return columns:
+
+```text
+0, 1, 2, 3, 4, 5, 6, 7, 9, ..., 31
+```
+
+with:
+
+```verilog
+tdc_value = 14'h0028;
+```
 
 ## Why There Is A Delay Before Wishbone Read
 
@@ -461,7 +615,10 @@ completion message.
 - Do not skip the first three configuration writes.
 - Do not expect SET or RESET to return a TDC result directly.
 - Send a READ command before expecting a TDC response.
+- Send three COMPUTE packets before expecting compute response data.
+- Perform 32 Wishbone reads after each compute operation.
+- Remember that the first compute read is the selected column result.
+- Remember that the remaining compute reads return timeout TDC values.
 - Use `wb_read32(ADDR_MATCH, rdata)` to read the response FIFO.
 - Decode `rdata[13:0]` as the TDC value.
 - Decode `rdata[18:14]` as the returned column.
-
